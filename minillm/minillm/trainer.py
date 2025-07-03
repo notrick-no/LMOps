@@ -1,56 +1,76 @@
-import json
-import os
-import deepspeed
-from time import time
-from typing import Optional, Tuple
-from collections import defaultdict
+# 基础库
+import json  # 处理JSON数据
+import os    # 操作系统接口
+import deepspeed  # 深度学习加速库
+from time import time  # 计时功能
+from typing import Optional, Tuple  # 类型提示
+from collections import defaultdict  # 带默认值的字典
 
-import torch
-import torch.nn.functional as F
-import torch.distributed as dist
-from torch.optim import AdamW
-from rich.console import Console
-from rich.table import Table
-from tqdm import tqdm
+# PyTorch相关
+import torch  # 深度学习框架
+import torch.nn.functional as F  # 神经网络函数
+import torch.distributed as dist  # 分布式训练
+from torch.optim import AdamW  # 优化器
+
+# 进度和可视化
+from rich.console import Console  # 终端美化输出
+from rich.table import Table  # 表格输出
+from tqdm import tqdm  # 进度条
+
+# Transformers相关
 from transformers import (
-    AutoTokenizer,
-    GenerationConfig,
-    mpu)
+    AutoTokenizer,  # 自动加载tokenizer
+    GenerationConfig,  # 生成配置
+    mpu)  # 模型并行工具
 
-from transformers import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+from transformers import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup  # 学习率调度器
 
+# 项目内部工具
 from .utils import (
-    get_log_probs,
-    get_rev_kl,
-    significant
+    get_log_probs,  # 计算对数概率
+    get_rev_kl,     # 计算反向KL散度(用于知识蒸馏)
+    significant     # 数值处理工具
 )
 
 from .model import (
-    PPOModel
+    PPOModel  # PPO模型实现
 )
 
-from .pipelines import PPOPipeline, LMPipeline
+from .pipelines import PPOPipeline, LMPipeline  # 数据处理管道
 
+from .storages import PPORolloutStorage  # 数据存储
+from .losses import Loss  # 损失函数实现(包含PPO和知识蒸馏)
 
-from .storages import PPORolloutStorage
-from .losses import Loss
-
-from utils import print_rank, save_rank, get_rank, all_gather, save_parallel
-from rouge_metric import compute_metrics
+# 实用工具
+from utils import print_rank, save_rank, get_rank, all_gather, save_parallel  # 分布式训练工具
+from rouge_metric import compute_metrics  # ROUGE评估指标
 
 
 class PPOTrainer():
     """
-    RL model trainer with an `accelerate` based backend
+    PPO训练器，实现基于强化学习的语言模型训练
+    主要功能：
+    1. 管理训练流程
+    2. 处理模型输入/输出
+    3. 实现评估逻辑
+    4. 支持知识蒸馏
     """
 
     def __init__(self, args, tokenizer: AutoTokenizer, reward_fn: callable, ds_config):
-        self.args = args
-        self.max_length = args.max_length
-        self.ds_config = ds_config
-        self.reward_fn = reward_fn
-        self.device = torch.cuda.current_device()
+        """初始化训练器
+        Args:
+            args: 训练参数
+            tokenizer: 文本tokenizer
+            reward_fn: 奖励函数
+            ds_config: DeepSpeed配置
+        """
+        self.args = args  # 训练参数
+        self.max_length = args.max_length  # 最大生成长度
+        self.ds_config = ds_config  # DeepSpeed配置
+        self.reward_fn = reward_fn  # 奖励函数(用于强化学习)
+        self.device = torch.cuda.current_device()  # 当前设备
 
+        # 分布式训练设置
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:
             dist.barrier(device_ids=[int(os.environ.get("LOCAL_RANK", 0))])
 
